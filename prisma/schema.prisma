@@ -1,0 +1,482 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Accounts & Identity ─────────────────────────────────────────────────────
+
+model User {
+  id               String   @id @default(cuid())
+  stellarAddress   String   @unique
+  displayName      String?
+  email            String?  @unique
+  avatarUrl        String?
+  organizationId   String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  isActive         Boolean  @default(true)
+
+  organization       Organization?        @relation(fields: [organizationId], references: [id])
+  trustScores        TrustScore[]
+  trustsGiven        TrustRelationship[]  @relation("Trustor")
+  trustsReceived     TrustRelationship[]  @relation("Trustee")
+  fundingStreams      FundingStream[]      @relation("StreamCreator")
+  receivedStreams     FundingStream[]      @relation("StreamRecipient")
+  beneficiaryRecords Beneficiary[]
+  apiKeys            ApiKey[]
+  auditLogs          AuditLog[]
+
+  @@index([stellarAddress])
+  @@index([organizationId])
+  @@map("users")
+}
+
+model Organization {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  stellarAddress String?  @unique
+  logoUrl        String?
+  website        String?
+  description    String?
+  country        String?
+  isVerified     Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  users            User[]
+  payrollBatches   PayrollBatch[]
+  fundingAllocations FundingAllocation[]
+  trustRelationships TrustRelationship[] @relation("OrgTrustRelationship")
+  complianceRecords  ComplianceRecord[]
+
+  @@index([slug])
+  @@map("organizations")
+}
+
+// ─── Trust Graph ─────────────────────────────────────────────────────────────
+
+model TrustRelationship {
+  id             String            @id @default(cuid())
+  trustorId      String
+  trusteeId      String
+  organizationId String?
+  trustType      TrustType
+  weight         Float             @default(1.0)
+  status         TrustStatus       @default(ACTIVE)
+  metadata       Json?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  expiresAt      DateTime?
+
+  trustor      User          @relation("Trustor", fields: [trustorId], references: [id])
+  trustee      User          @relation("Trustee", fields: [trusteeId], references: [id])
+  organization Organization? @relation("OrgTrustRelationship", fields: [organizationId], references: [id])
+
+  @@unique([trustorId, trusteeId, trustType])
+  @@index([trustorId])
+  @@index([trusteeId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("trust_relationships")
+}
+
+model TrustScore {
+  id          String   @id @default(cuid())
+  userId      String
+  score       Float
+  components  Json
+  algorithm   String   @default("v1")
+  computedAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([score])
+  @@index([computedAt])
+  @@map("trust_scores")
+}
+
+// ─── Funding Streams ──────────────────────────────────────────────────────────
+
+model FundingStream {
+  id              String        @id @default(cuid())
+  stellarTxHash   String?       @unique
+  creatorId       String
+  recipientId     String
+  asset           String
+  totalAmount     Decimal       @db.Decimal(28, 7)
+  releasedAmount  Decimal       @default(0) @db.Decimal(28, 7)
+  startTime       DateTime
+  endTime         DateTime?
+  status          StreamStatus  @default(ACTIVE)
+  streamType      StreamType
+  metadata        Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  creator     User                @relation("StreamCreator", fields: [creatorId], references: [id])
+  recipient   User                @relation("StreamRecipient", fields: [recipientId], references: [id])
+  allocations FundingAllocation[]
+
+  @@index([creatorId])
+  @@index([recipientId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("funding_streams")
+}
+
+model FundingAllocation {
+  id              String          @id @default(cuid())
+  streamId        String
+  organizationId  String
+  amount          Decimal         @db.Decimal(28, 7)
+  asset           String
+  milestone       String?
+  status          AllocationStatus @default(PENDING)
+  txHash          String?
+  releasedAt      DateTime?
+  createdAt       DateTime        @default(now())
+
+  stream       FundingStream @relation(fields: [streamId], references: [id])
+  organization Organization  @relation(fields: [organizationId], references: [id])
+
+  @@index([streamId])
+  @@index([organizationId])
+  @@map("funding_allocations")
+}
+
+// ─── Payroll & Remittance ─────────────────────────────────────────────────────
+
+model PayrollBatch {
+  id              String       @id @default(cuid())
+  organizationId  String
+  batchRef        String       @unique
+  totalAmount     Decimal      @db.Decimal(28, 7)
+  asset           String
+  recipientCount  Int
+  status          BatchStatus  @default(PENDING)
+  scheduledAt     DateTime?
+  processedAt     DateTime?
+  stellarTxHashes String[]
+  metadata        Json?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  organization  Organization  @relation(fields: [organizationId], references: [id])
+  beneficiaries Beneficiary[]
+  settlements   Settlement[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("payroll_batches")
+}
+
+model Beneficiary {
+  id              String             @id @default(cuid())
+  userId          String?
+  batchId         String
+  stellarAddress  String
+  amount          Decimal            @db.Decimal(28, 7)
+  asset           String
+  country         String
+  status          BeneficiaryStatus  @default(PENDING)
+  txHash          String?
+  settledAt       DateTime?
+  createdAt       DateTime           @default(now())
+
+  user  User?        @relation(fields: [userId], references: [id])
+  batch PayrollBatch @relation(fields: [batchId], references: [id])
+
+  @@index([batchId])
+  @@index([stellarAddress])
+  @@index([country])
+  @@map("beneficiaries")
+}
+
+model Settlement {
+  id            String           @id @default(cuid())
+  batchId       String
+  anchorId      String
+  txHash        String           @unique
+  amount        Decimal          @db.Decimal(28, 7)
+  asset         String
+  targetCurrency String?
+  fxRate        Float?
+  fee           Decimal?         @db.Decimal(28, 7)
+  status        SettlementStatus @default(PENDING)
+  settledAt     DateTime?
+  createdAt     DateTime         @default(now())
+
+  batch PayrollBatch @relation(fields: [batchId], references: [id])
+
+  @@index([batchId])
+  @@index([anchorId])
+  @@map("settlements")
+}
+
+model ComplianceRecord {
+  id             String           @id @default(cuid())
+  organizationId String
+  recordType     String
+  status         ComplianceStatus @default(PENDING)
+  data           Json
+  verifiedAt     DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("compliance_records")
+}
+
+// ─── Stellar Chain Data ───────────────────────────────────────────────────────
+
+model Transaction {
+  id              String          @id @default(cuid())
+  txHash          String          @unique
+  ledger          Int
+  sourceAccount   String
+  fee             Int
+  operationCount  Int
+  memo            String?
+  successful      Boolean
+  createdAt       DateTime
+  indexedAt       DateTime        @default(now())
+  raw             Json?
+
+  payments Payment[]
+
+  @@index([sourceAccount])
+  @@index([ledger])
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+model Payment {
+  id              String      @id @default(cuid())
+  txId            String
+  txHash          String
+  operationId     String      @unique
+  type            PaymentType
+  fromAddress     String
+  toAddress       String
+  assetCode       String
+  assetIssuer     String?
+  amount          Decimal     @db.Decimal(28, 7)
+  memo            String?
+  country         String?
+  createdAt       DateTime
+  indexedAt       DateTime    @default(now())
+
+  transaction Transaction @relation(fields: [txId], references: [id])
+
+  @@index([fromAddress])
+  @@index([toAddress])
+  @@index([assetCode])
+  @@index([country])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+model Asset {
+  id          String   @id @default(cuid())
+  code        String
+  issuer      String?
+  type        String
+  domain      String?
+  name        String?
+  imageUrl    String?
+  isAnchored  Boolean  @default(false)
+  totalSupply Decimal? @db.Decimal(28, 7)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([code, issuer])
+  @@index([code])
+  @@map("assets")
+}
+
+model Trustline {
+  id        String   @id @default(cuid())
+  account   String
+  assetCode String
+  issuer    String
+  limit     Decimal  @db.Decimal(28, 7)
+  balance   Decimal  @db.Decimal(28, 7)
+  updatedAt DateTime @updatedAt
+
+  @@unique([account, assetCode, issuer])
+  @@index([account])
+  @@map("trustlines")
+}
+
+// ─── Analytics ────────────────────────────────────────────────────────────────
+
+model AnalyticsSnapshot {
+  id          String       @id @default(cuid())
+  snapshotType SnapshotType
+  period      String
+  data        Json
+  createdAt   DateTime     @default(now())
+
+  @@index([snapshotType, period])
+  @@index([createdAt])
+  @@map("analytics_snapshots")
+}
+
+model CountryStat {
+  id           String   @id @default(cuid())
+  country      String
+  date         DateTime @db.Date
+  volume       Decimal  @db.Decimal(28, 7)
+  txCount      Int      @default(0)
+  userCount    Int      @default(0)
+  assetCode    String?
+  updatedAt    DateTime @updatedAt
+
+  @@unique([country, date, assetCode])
+  @@index([country])
+  @@index([date])
+  @@map("country_stats")
+}
+
+// ─── Security & Auth ──────────────────────────────────────────────────────────
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  userId      String
+  name        String
+  keyHash     String    @unique
+  prefix      String
+  permissions String[]
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  isActive    Boolean   @default(true)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  resource  String
+  resourceId String?
+  metadata  Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model IndexerState {
+  id          String   @id @default(cuid())
+  indexerName String   @unique
+  lastLedger  Int      @default(0)
+  lastCursor  String?
+  metadata    Json?
+  updatedAt   DateTime @updatedAt
+
+  @@map("indexer_states")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum TrustType {
+  PERSONAL
+  PROFESSIONAL
+  ORGANIZATIONAL
+  DELEGATED
+}
+
+enum TrustStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+  PENDING
+}
+
+enum StreamStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum StreamType {
+  SALARY
+  GRANT
+  AID
+  MILESTONE
+  RECURRING
+}
+
+enum AllocationStatus {
+  PENDING
+  RELEASED
+  CANCELLED
+}
+
+enum BatchStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum BeneficiaryStatus {
+  PENDING
+  PROCESSING
+  SETTLED
+  FAILED
+}
+
+enum SettlementStatus {
+  PENDING
+  PROCESSING
+  SETTLED
+  FAILED
+}
+
+enum ComplianceStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum PaymentType {
+  PAYMENT
+  PATH_PAYMENT
+  CREATE_ACCOUNT
+  MERGE_ACCOUNT
+}
+
+enum SnapshotType {
+  DAILY_VOLUME
+  WEEKLY_VOLUME
+  MONTHLY_VOLUME
+  TRUST_METRICS
+  FUNDING_METRICS
+  PAYROLL_METRICS
+  ECOSYSTEM_GROWTH
+}
